@@ -5,12 +5,14 @@ originally from http://www.djangosnippets.org/snippets/828/ by dnordberg
 from django.conf import settings
 from django.core.management.base import CommandError, BaseCommand
 from django.core.management import sql
+from django.core.management.color import no_style
 from django.db.models import get_apps
+from django.db import connections, transaction, DatabaseError
 import django
 import logging
 import re
 from optparse import make_option
-
+import pdb
 
 class Command(BaseCommand):
     option_list = BaseCommand.option_list + (
@@ -84,9 +86,11 @@ class Command(BaseCommand):
             connection.settings_dict['PASSWORD'] = options['password']
         if 'dbname' in options:
             connection.settings_dict['NAME'] = options['dbname']
-        return connection
+	print connection.settings_dict
+        return connection, router
 
     def handle(self, *args, **options):
+        self.style = no_style()
         options = self.clean_options(options)
         verbosity = int(options.get('verbosity', 1))
         if options.get('interactive'):
@@ -112,21 +116,27 @@ Type 'yes' to continue, or 'no' to cancel: """ % (settings.DATABASE_NAME,))
             print "Reset successful."
 
     def handle_gt_12(self, *args, **options):
-        connection = self.getConnection(*args, **options)
+        connection, router = self.getConnection(*args, **options)
         d_only = options['django_only']
-        drop_commands = sql.sql_flush(
-            self.style,
-            connection,
-            only_django=d_only
-        )
-        create_commands = []
+        drop_commands = []
         apps = get_apps()
         for app in apps:
-            create_commands.extend(
-                sql.sql_create(app, self.style, connection)
+            drop_commands.extend(
+                sql.sql_delete(app,self.style, connection)
             )
-        connection.cursor().executemany(drop_commands, [])
-        connection.cursor().executemany(create_commands, [])
+        connection.enter_transaction_management(True) 
+        for cmd in drop_commands:
+            cursor = connection.cursor()
+            # we're dropping everything so it's alright to cascade
+            c =  '%s CASCADE;' % cmd[:-1] 
+            if re.match('DROP', c):
+                try:
+                    cursor.execute(c)
+                    connection.commit()
+                except DatabaseError as e:
+                    connection.rollback()
+                    continue
+        connection.leave_transaction_management()
 
     def handle_lt_12(self, *args, **options):
         """
